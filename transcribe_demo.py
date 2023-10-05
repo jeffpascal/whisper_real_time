@@ -6,6 +6,7 @@ import os
 import speech_recognition as sr
 import whisper
 import torch
+import asyncio
 
 from datetime import datetime, timedelta
 from queue import Queue
@@ -13,18 +14,20 @@ from tempfile import NamedTemporaryFile
 from time import sleep
 from sys import platform
 
+from chat_gpt_assist import *
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="medium", help="Model to use",
+    parser.add_argument("--model", default="base", help="Model to use",
                         choices=["tiny", "base", "small", "medium", "large"])
     parser.add_argument("--non_english", action='store_true',
                         help="Don't use the english model.")
     parser.add_argument("--energy_threshold", default=1000,
                         help="Energy level for mic to detect.", type=int)
-    parser.add_argument("--record_timeout", default=2,
+    parser.add_argument("--record_timeout", default=1,
                         help="How real time the recording is in seconds.", type=float)
-    parser.add_argument("--phrase_timeout", default=3,
+    parser.add_argument("--phrase_timeout", default=2,
                         help="How much empty space between recordings before we "
                              "consider it a new line in the transcription.", type=float)
     if 'linux' in platform:
@@ -92,9 +95,18 @@ def main():
 
     # Cue the user that we're ready to go.
     print("Model loaded.\n")
-
+    phrase_complete = False
+    last_processed_time = None
+    previous_question = None
     while True:
         try:
+            if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
+                last_sample = bytes()
+                phrase_complete = True
+
+            if not data_queue.empty():
+                phrase_time = now
+
             now = datetime.utcnow()
             # Pull raw recorded audio from the queue.
             if not data_queue.empty():
@@ -104,6 +116,10 @@ def main():
                 if phrase_time and now - phrase_time > timedelta(seconds=phrase_timeout):
                     last_sample = bytes()
                     phrase_complete = True
+
+                    # chatgpt answers
+                    
+                    
                 # This is the last time we received new audio data from the queue.
                 phrase_time = now
 
@@ -126,7 +142,7 @@ def main():
 
                 # If we detected a pause between recordings, add a new item to our transcription.
                 # Otherwise edit the existing one.
-                if phrase_complete:
+                if phrase_complete:                    
                     transcription.append(text)
                 else:
                     transcription[-1] = text
@@ -139,7 +155,19 @@ def main():
                 print('', end='', flush=True)
 
                 # Infinite loops are bad for processors, must sleep.
-                sleep(0.25)
+                sleep(0.10)
+            elif phrase_complete and (last_processed_time is None or now - last_processed_time > timedelta(seconds=phrase_timeout)):
+                # Process transcription with ChatGPT
+
+                if (transcription[-1] == previous_question):
+                    continue
+
+                print(transcription[-1])
+                generated_text = asyncio.run(generate_corrected_transcript(0, transcription[-1]))
+                
+                previous_question = transcription[-1]
+
+                last_processed_time = now
         except KeyboardInterrupt:
             break
 
